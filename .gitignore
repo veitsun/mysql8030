@@ -1,0 +1,4 @@
+conf/*
+data/*
+log/*
+sysbench_results/*
