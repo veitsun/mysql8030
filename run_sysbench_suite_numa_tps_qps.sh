@@ -88,12 +88,12 @@ lua_exists() {
 # Extract TPS and QPS (per sec) from sysbench output
 extract_tps() {
   local file="$1"
-  awk '/transactions:/{print $(NF-2)}' "$file" | tail -n1 2>/dev/null || true
+  awk '/transactions:/{v=$(NF-2); gsub(/[()]/,"",v); print v}' "$file" | tail -n1 2>/dev/null || true
 }
 
 extract_qps() {
   local file="$1"
-  awk '/queries:/{print $(NF-2)}' "$file" | tail -n1 2>/dev/null || true
+  awk '/queries:/{v=$(NF-2); gsub(/[()]/,"",v); print v}' "$file" | tail -n1 2>/dev/null || true
 }
 
 run_workload() {
