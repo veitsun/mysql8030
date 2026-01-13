@@ -124,11 +124,13 @@ SELECT user, host, plugin FROM mysql.user WHERE user='sbuser';
 
 ```
 
+``` text
 +--------+------+-----------------------+
 | user   | host | plugin                |
 +--------+------+-----------------------+
 | sbuser | %    | mysql_native_password |
 +--------+------+-----------------------+
+```
 
 ```bash
 docker run --rm --network=host severalnines/sysbench \
@@ -219,3 +221,81 @@ CPUSET_NODE0="0-13" CPUSET_NODE1="14-27" NUMA_PROFILE=node1_mem1 ./run_sysbench_
 这样你能比较：
 - 不同压测端 NUMA 组合对 TPS/抖动的影响
 - 如果你也重建 MySQL 容器为不同 NUMA_PROFILE，则可以比较数据库侧 NUMA 影响
+
+
+---
+
+# 远端压测
+## 创建测试库/账号
+授权远程用户
+MySQL 的 root 在很多镜像默认只允许本地登录，需要创建一个远程账户：
+```bash
+docker exec -it mysql8030 mysql -uroot -pRootPass\!123 -e "
+CREATE DATABASE sbtest;
+CREATE USER 'sbuser'@'%' IDENTIFIED BY 'sbpass';
+GRANT ALL PRIVILEGES ON sbtest.* TO 'sbuser'@'%';
+FLUSH PRIVILEGES;"
+```
+
+然后 sysbench 用这个账号做压测
+
+## preapare 灌数据
+
+```bash
+docker run --rm --network=host severalnines/sysbench \
+  sysbench /usr/share/sysbench/oltp_read_write.lua \
+  --mysql-host=127.0.0.1 --mysql-port=3306 \
+  --mysql-user=sbuser --mysql-password=sbpass --mysql-db=sbtest \
+  --tables=16 --table-size=1000000 \
+  prepare
+
+```
+
+## 远端压测，基本命令
+
+### 启动数据库
+指定 NUMA profile 运行 (MySQL服务启动在 231 的服务器上) (InnoDB buffer pool 的 NUMA 绑定，发生在 MySQL 服务器进程 上，
+跟 sysbench 端一毛钱关系都没有。)
+
+这里已经开始做内存亲和性绑定
+```bash
+CPUSET_NODE0="0-27" CPUSET_NODE1="28-55" NUMA_PROFILE=node0_mem0 ./run_mysql_8030_numa.sh
+```
+这个脚本在做什么：
+> 删掉旧的 MySQL 容器 → 保留数据 → 按指定 NUMA 节点绑 CPU 和内存 → 启动一个新的 MySQL 8.0.30 容器 → 等它起来
+
+### sysbench压测，单次测试
+在运行 sysbench 做压测前，需要保证做压测的数据存在。我们之前已经 prepare 了数据
+--rm 容器运行完了之后会自动删除，但数据库里的表还在，除非执行 cleanup
+
+
+```bash
+docker run --rm severalnines/sysbench \
+  sysbench oltp_read_write \
+    --db-driver=mysql \
+    --mysql-host=192.168.1.231 \
+    --mysql-port=3306 \
+    --mysql-user=sbuser \
+    --mysql-password='sbpass' \
+    --mysql-db=sbtest \
+    --tables=16 \
+    --table-size=1000000 \
+    --threads=32 \
+    --time=60 \
+    --report-interval=1 \
+    run
+```
+
+
+### run_sysbench_oltp_rw_remote 脚本
+
+```bash
+
+chmod +x run_sysbench_oltp_rw_remote.sh
+
+MYSQL_HOST=192.168.1.231 MYSQL_PORT=3306 MYSQL_USER=sbuser MYSQL_PASS=sbpass \
+THREADS=32 TIME=60 RUNS=3 \
+./run_sysbench_oltp_rw_remote.sh
+
+
+```
