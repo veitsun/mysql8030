@@ -1,4 +1,4 @@
-# 简单测试
+# 本地简单测试
 
 ## 0）确认自己是否可以使用 docker
 
@@ -155,7 +155,7 @@ docker run --rm --network=host severalnines/sysbench \
 
 ```
 
-# 完整测试脚本
+# 本地完整测试脚本
 ## 0）准备工作（确认 NUMA node 对应 CPU 列表）
 ```bash
 numactl --hardware
@@ -299,3 +299,49 @@ THREADS=32 TIME=60 RUNS=3 \
 
 
 ```
+## 远端压测脚本，并对比图
+
+用法（远端 MySQL 已按对应 NUMA_PROFILE 启动好后再跑）
+记得在每次压测前，先在 远端 mysql主机 上按对应 NUMA_PROFILE 重新启动 MySQL，然后再执行脚本记录该场景数据。
+
+```bash
+# 在 远端 mysql 主机上（我这里在 231 上）
+CPUSET_NODE0="0-27" CPUSET_NODE1="28-55" NUMA_PROFILE=node0_mem0 ./run_mysql_8030_numa.sh
+
+# 覆盖场景标签和 MySQL NUMA 绑定，建议一次跑一个场景，远端 MySQL 手动切换后再跑下一次
+SCENARIOS="node0_mem0" \
+MYSQL_HOST=192.168.1.231 MYSQL_PORT=3306 MYSQL_USER=sbuser MYSQL_PASS=sbpass MYSQL_DB=sbtest \
+THREADS=32 TIME=60 RUNS=3 TABLES=16 TABLE_SIZE=1000000 \
+./run_sysbench_oltp_rw_remote_numa_compare.sh
+
+
+# 在 远端 mysql 主机上（我这里在 231 上）
+CPUSET_NODE0="0-27" CPUSET_NODE1="28-55" NUMA_PROFILE=node0_mem1 ./run_mysql_8030_numa.sh
+
+# 切换远端 MySQL 为 node0_mem1 后，再跑一次，这次跑的结果是追加到 oltp_rw_remote_numa_compare.csv 这个文件中，每个场景多轮的 log 文件在同目录
+SCENARIOS="node0_mem1" \
+MYSQL_HOST=192.168.1.231 MYSQL_PORT=3306 MYSQL_USER=sbuser MYSQL_PASS=sbpass MYSQL_DB=sbtest \
+THREADS=32 TIME=60 RUNS=3 TABLES=16 TABLE_SIZE=1000000 \
+./run_sysbench_oltp_rw_remote_numa_compare.sh
+
+
+```
+
+画图(需要  matplotlib )
+```python
+python3 plot_sysbench_numa_compare.py \
+  --csv sysbench_results/oltp_rw_remote_numa_compare.csv \
+  --output sysbench_results/oltp_rw_numa_compare.png
+
+```
+
+画图（这个凸显数据对比的差异）
+--pad-ratio 是控制纵轴“留白”比例的参数。脚本在根据数据范围设定 y 轴上下界后，会按 (最大均值-最小均值) * pad_ratio（再加一点误差线余量）扩展上下边界。
+- 数值越小：越紧贴数据，放大差异，裁掉更多低位区间。
+- 数值越大：留白更多，纵轴更宽松，便于避免标注/箭头重叠。默认值 0.25，想更聚焦可试 0.1，如需更多空间可试 0.4
+
+```python
+python3 plot_sysbench_numa_compare_zoomed.py --csv sysbench_results/oltp_rw_remote_numa_compare.csv --output sysbench_results/oltp_rw_numa_compare_zoom.png --pad-ratio 0.2
+```
+
+## 远端压测修改并发数，并修改测试数据量，重新做压测
