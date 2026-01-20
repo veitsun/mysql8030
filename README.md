@@ -344,4 +344,80 @@ python3 plot_sysbench_numa_compare.py \
 python3 plot_sysbench_numa_compare_zoomed.py --csv sysbench_results/oltp_rw_remote_numa_compare.csv --output sysbench_results/oltp_rw_numa_compare_zoom.png --pad-ratio 0.2
 ```
 
-## 远端压测修改并发数，并修改测试数据量，重新做压测
+## 远端压测修改并发数，并修改测试数据量，重新做压测 
+当前的 innodb_buffer_pool_size=2G
+
+建议的测试参数
+- 数据集：至少 ~6–9GB（是 buffer pool 的 3–4.5 倍）。可用 TABLE_SIZE=3000000，16 张表，总行数 48M，粗算 ~9GB。
+- 压测线程：64 或 128（提高并发更容易打满内存带宽）。
+- 时间：每轮 60–120 秒。
+
+### 重新准备数据
+先清理掉旧的 sbtest 数据
+```bash
+docker run --rm --network=host severalnines/sysbench \
+  sysbench /usr/share/sysbench/oltp_read_write.lua \
+  --mysql-host=192.168.1.231 --mysql-port=3306 \
+  --mysql-user=sbuser --mysql-password=sbpass --mysql-db=sbtest \
+  --tables=16 \
+  cleanup
+
+```
+
+重新 prepare ，更大的表
+```bash
+docker run --rm --network=host severalnines/sysbench \
+  sysbench /usr/share/sysbench/oltp_read_write.lua \
+  --mysql-host=192.168.1.231 --mysql-port=3306 \
+  --mysql-user=sbuser --mysql-password=sbpass --mysql-db=sbtest \
+  --tables=16 --table-size=3000000 \
+  prepare
+
+```
+
+### 压测
+
+```bash
+# 远端 MySQL 启动（在 231 上执行）
+# 压测命令（在 sysbench 客户端执行，按场景分别跑）
+
+# 本地内存场景：
+CPUSET_NODE0="0-27,56-83" CPUSET_NODE1="28-55,84-111" \
+NUMA_PROFILE=node0_mem0 ./run_mysql_8030_numa.sh
+
+SCENARIOS="node0_mem0" \
+MYSQL_HOST=192.168.1.231 MYSQL_PORT=3306 MYSQL_USER=sbuser MYSQL_PASS=sbpass MYSQL_DB=sbtest \
+THREADS=64 TIME=90 RUNS=10 TABLES=16 TABLE_SIZE=3000000 \
+./run_sysbench_oltp_rw_remote_numa_compare.sh
+
+# 跨节点场景（MySQL 已切到 node0_mem1 后）：
+CPUSET_NODE0="0-27,56-83" CPUSET_NODE1="28-55,84-111" \
+NUMA_PROFILE=node0_mem1 ./run_mysql_8030_numa.sh
+
+SCENARIOS="node0_mem1" \
+MYSQL_HOST=192.168.1.231 MYSQL_PORT=3306 MYSQL_USER=sbuser MYSQL_PASS=sbpass MYSQL_DB=sbtest \
+THREADS=64 TIME=90 RUNS=10 TABLES=16 TABLE_SIZE=3000000 \
+./run_sysbench_oltp_rw_remote_numa_compare.sh
+
+
+```
+
+
+### 画图
+
+画图(需要  matplotlib )
+```python
+python3 plot_sysbench_numa_compare.py \
+  --csv sysbench_results/oltp_rw_remote_numa_compare.csv \
+  --output sysbench_results/oltp_rw_numa_compare.png
+
+```
+
+画图（这个凸显数据对比的差异）
+--pad-ratio 是控制纵轴“留白”比例的参数。脚本在根据数据范围设定 y 轴上下界后，会按 (最大均值-最小均值) * pad_ratio（再加一点误差线余量）扩展上下边界。
+- 数值越小：越紧贴数据，放大差异，裁掉更多低位区间。
+- 数值越大：留白更多，纵轴更宽松，便于避免标注/箭头重叠。默认值 0.25，想更聚焦可试 0.1，如需更多空间可试 0.4
+
+```python
+python3 plot_sysbench_numa_compare_zoomed.py --csv sysbench_results/oltp_rw_remote_numa_compare.csv --output sysbench_results/oltp_rw_numa_compare_zoom.png --pad-ratio 0.2
+```
