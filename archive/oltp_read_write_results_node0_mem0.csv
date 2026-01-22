@@ -1,4 +1,0 @@
-run_id,timestamp,iteration,workload,status,tps,qps,threads,time_s,tables,table_size
-20260109_205808,2026-01-09 20:58:09,1,oltp_read_write,ok,2808.47,56169.31,32,60,16,1000000
-20260109_205808,2026-01-09 20:59:12,2,oltp_read_write,ok,2803.07,56061.30,32,60,16,1000000
-20260109_205808,2026-01-09 21:00:12,3,oltp_read_write,ok,2802.33,56046.58,32,60,16,1000000

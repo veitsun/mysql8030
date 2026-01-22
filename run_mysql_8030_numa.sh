@@ -11,13 +11,13 @@ set -euo pipefail
 MYSQL_IMAGE="${MYSQL_IMAGE:-mysql:8.0.30}"
 CONTAINER_NAME="${CONTAINER_NAME:-mysql8030}"
 HOST_PORT="${HOST_PORT:-3306}"
-MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-RootPass!123}"
+MYSQL_ROOT_PASSWORD="${MYSQL_ROOT_PASSWORD:-sunwei}"
 
 # Data persistence: Docker volume
 DATA_VOLUME="${DATA_VOLUME:-mysql8030_data}"
 
 # MySQL config file on host (must exist)
-MYCNF="${MYCNF:-$HOME/mysql8030/conf/my.cnf}"
+MYCNF="${MYCNF:-./conf/my.cnf}"
 
 # ---- NUMA selection: just change this ----
 NUMA_PROFILE="${NUMA_PROFILE:-node0_mem0}"

@@ -20,14 +20,14 @@ docker pull mysql:8.0.30
 ### 2.1 在 $HOME 下创建目录（无需 sudo）
 
 ```bash
-mkdir -p ~/mysql8030/{data,conf,log}
+mkdir -p ./{data,conf,log}
 
 ```
 
-### 2.2 写配置文件（无需 sudo）
+### 2.2 写配置文件
 
 ```bash
-cat > ~/mysql8030/conf/my.cnf <<'EOF'
+cat > ./conf/my.cnf <<'EOF'
 [mysqld]
 port=3306
 bind-address=0.0.0.0
@@ -47,19 +47,18 @@ EOF
 
 ```
 
-### 2.3 运行 MySQL 容器（无需 sudo）
+### 2.3 运行 MySQL 容器
 
 ```bash
 
 docker run -d --name mysql8030 \
   -p 3306:3306 \
-  -e MYSQL_ROOT_PASSWORD='RootPass!123' \
-  -v "$HOME/mysql8030/data:/var/lib/mysql" \
-  -v "$HOME/mysql8030/conf/my.cnf:/etc/mysql/conf.d/my.cnf:ro" \
-  -v "$HOME/mysql8030/log:/var/log/mysql" \
+  -e MYSQL_ROOT_PASSWORD='sunwei' \
+  -v "./data:/var/lib/mysql" \
+  -v "./conf/my.cnf:/etc/mysql/conf.d/my.cnf:ro" \
+  -v "./log:/var/log/mysql" \
   --user "$(id -u):$(id -g)" \
   mysql:8.0.30
-
 ```
 
 ## 3） 验证 MySql 正常启动
@@ -92,14 +91,14 @@ docker run -d --name mysql8030 \
   --cpuset-cpus="0-31" \
   --cpuset-mems="0" \
   -p 3306:3306 \
-  -e MYSQL_ROOT_PASSWORD='RootPass!123' \
+  -e MYSQL_ROOT_PASSWORD='sunwei' \
   -v mysql8030_data:/var/lib/mysql \
-  -v "$HOME/mysql8030/conf/my.cnf:/etc/mysql/conf.d/my.cnf:ro" \
+  -v "./conf/my.cnf:/etc/mysql/conf.d/my.cnf:ro" \
   mysql:8.0.30
 
 ```
 
-## 5）测试（无需安装 sysbench）：用 sysbench 容器压 MySQL 容器
+## 5）压测:  用 sysbench 容器 压测 MySQL 容器
 如果你能 pull mysql，那么也可以 pull sysbench 镜像：
 ```bash
 docker pull severalnines/sysbench
@@ -108,9 +107,9 @@ docker pull severalnines/sysbench
 
 ### 5.1 创建测试库/账号
 ```bash
-docker exec -it mysql8030 mysql -uroot -pRootPass\!123 -e "
+docker exec -it mysql8030 mysql -uroot -psunwei -e "
 CREATE DATABASE sbtest;
-CREATE USER 'sbuser'@'%' IDENTIFIED BY 'sbpass';
+CREATE USER 'sbuser'@'%' IDENTIFIED WITH mysql_native_password BY 'sbpass';
 GRANT ALL PRIVILEGES ON sbtest.* TO 'sbuser'@'%';
 FLUSH PRIVILEGES;"
 ```
@@ -118,9 +117,8 @@ FLUSH PRIVILEGES;"
 ### 5.2 prepare（灌数据）
 在灌数据之前，验证 sbuser 的认证插件确实变成 mysql_native_password
 ```bash
-docker exec -it mysql8030 mysql -uroot -pRootPass\!123 -e "
-SELECT user, host, plugin FROM mysql.user WHERE user='sbuser';
-"
+docker exec -it mysql8030 mysql -uroot -psunwei -e "
+SELECT user, host, plugin FROM mysql.user WHERE user='sbuser';"
 
 ```
 
@@ -131,7 +129,7 @@ SELECT user, host, plugin FROM mysql.user WHERE user='sbuser';
 | sbuser | %    | mysql_native_password |
 +--------+------+-----------------------+
 ```
-
+灌入数据：
 ```bash
 docker run --rm --network=host severalnines/sysbench \
   sysbench /usr/share/sysbench/oltp_read_write.lua \
@@ -140,6 +138,28 @@ docker run --rm --network=host severalnines/sysbench \
   --tables=16 --table-size=1000000 \
   prepare
 
+
+# 不走 docker
+sysbench /usr/share/sysbench/oltp_read_write.lua   --mysql-host=100.111.254.126 --mysql-port=3306   --mysql-user=sbuser --mysql-password=sbpass --mysql-db=sbtest   --tables=16 --table-size=1000000   prepare
+
+```
+清理数据：
+```bash
+sysbench /usr/share/sysbench/oltp_read_write.lua \
+  --mysql-host=100.111.254.126 --mysql-port=3306 \
+  --mysql-user=sbuser --mysql-password=sbpass --mysql-db=sbtest \
+  --tables=16 --table-size=1000000 \
+  cleanup
+
+```
+
+刚灌入数据之后，建议把 os page cache 和 buffer pool清理一下：
+```bash
+# 会影响业务
+sync
+echo 3 | sudo tee /proc/sys/vm/drop_caches
+#重启
+docker restart mysql8030
 ```
 
 ### 5.3 oltp_read_write TPS 测试
@@ -152,6 +172,16 @@ docker run --rm --network=host severalnines/sysbench \
   --tables=16 --table-size=1000000 \
   --threads=32 --time=60 --report-interval=1 \
   run
+
+# 不走 docker
+sysbench /usr/share/sysbench/oltp_read_write.lua \
+  --mysql-host=100.111.254.126 --mysql-port=3306 \
+  --mysql-user=sbuser --mysql-password=sbpass --mysql-db=sbtest \
+  --tables=16 --table-size=1000000 \
+  --threads=32 --time=60 --report-interval=1 \
+  --db-driver=mysql \
+  run
+
 
 ```
 
@@ -230,7 +260,7 @@ CPUSET_NODE0="0-13" CPUSET_NODE1="14-27" NUMA_PROFILE=node1_mem1 ./run_sysbench_
 授权远程用户
 MySQL 的 root 在很多镜像默认只允许本地登录，需要创建一个远程账户：
 ```bash
-docker exec -it mysql8030 mysql -uroot -pRootPass\!123 -e "
+docker exec -it mysql8030 mysql -uroot -psunwei -e "
 CREATE DATABASE sbtest;
 CREATE USER 'sbuser'@'%' IDENTIFIED BY 'sbpass';
 GRANT ALL PRIVILEGES ON sbtest.* TO 'sbuser'@'%';
