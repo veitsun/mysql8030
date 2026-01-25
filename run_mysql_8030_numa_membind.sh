@@ -3,8 +3,8 @@ set -euo pipefail
 
 ###############################################################################
 # Recreate MySQL 8.0.30 Docker container with NUMA binding.
-# - Keeps data by default (docker volume).
-# - Allows "nodeX_memY" profile selection.
+# If MEM node is memory-only, allow CPU+MEM nodes in cpuset.mems and start
+# mysqld under numactl --membind=<mem node>.
 ###############################################################################
 
 # --------------------------- Config (edit) -----------------------------------
@@ -32,6 +32,10 @@ CPUSET_NODE1="${CPUSET_NODE1:-32-63}"
 # If MEMSET_NODEx is not set, it defaults to x.
 MEMSET_NODE0="${MEMSET_NODE0:-0}"
 MEMSET_NODE1="${MEMSET_NODE1:-1}"
+
+# Paths inside the container (override if your image differs)
+NUMACTL_BIN="${NUMACTL_BIN:-/usr/bin/numactl}"
+ENTRYPOINT_BIN="${ENTRYPOINT_BIN:-/usr/local/bin/docker-entrypoint.sh}"
 # ----------------------------------------------------------------------------
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -40,6 +44,10 @@ NUMA_CPU_NODE=""
 NUMA_MEM_NODE=""
 NUMA_CPUS=""
 NUMA_MEMS=""
+MEM_NODE_MEMORY_ONLY=0
+MEMORY_ONLY_NODES=""
+USE_NUMACTL=0
+NUMACTL_MEMBIND=""
 
 read_first_nonempty() {
   local path value
@@ -70,6 +78,17 @@ mems_contains() {
   return 1
 }
 
+ensure_mems_include_node() {
+  local list="$1" node="$2"
+  if mems_contains "$list" "$node"; then
+    echo "$list"
+  elif [[ -z "$list" ]]; then
+    echo "$node"
+  else
+    echo "${list},${node}"
+  fi
+}
+
 get_allowed_mems() {
   read_first_nonempty \
     /sys/fs/cgroup/system.slice/docker.service/cpuset.mems.effective \
@@ -94,6 +113,27 @@ validate_mem_node() {
     if ! mems_contains "$allowed" "$mem_node"; then
       die "MEM node ${mem_node} not allowed by cgroup (allowed: ${allowed})"
     fi
+  fi
+}
+
+is_memory_only_node() {
+  local node="$1"
+  local cpulist_path="/sys/devices/system/node/node${node}/cpulist"
+  [[ -r "$cpulist_path" ]] || return 1
+  [[ -z "$(tr -d '[:space:]' < "$cpulist_path")" ]]
+}
+
+get_memory_only_nodes() {
+  local node_dir node nodes=()
+  for node_dir in /sys/devices/system/node/node[0-9]*; do
+    node="${node_dir##*node}"
+    if is_memory_only_node "$node"; then
+      nodes+=("$node")
+    fi
+  done
+  if ((${#nodes[@]})); then
+    local IFS=,
+    echo "${nodes[*]}"
   fi
 }
 
@@ -129,10 +169,15 @@ get_numa_args() {
   echo "--cpuset-cpus=${NUMA_CPUS} --cpuset-mems=${NUMA_MEMS}"
 }
 
+check_numactl_in_image() {
+  docker run --rm --entrypoint /bin/sh "${MYSQL_IMAGE}" \
+    -c "command -v ${NUMACTL_BIN} >/dev/null 2>&1"
+}
+
 main() {
   [[ -f "$MYCNF" ]] || die "my.cnf not found: $MYCNF"
 
-  echo "=== Recreate MySQL 8.0.30 with NUMA binding ==="
+  echo "=== Recreate MySQL 8.0.30 with NUMA binding (membind mode) ==="
   echo "Container      : ${CONTAINER_NAME}"
   echo "Image          : ${MYSQL_IMAGE}"
   echo "Port           : ${HOST_PORT}->3306"
@@ -143,10 +188,28 @@ main() {
 
   resolve_numa_profile "$NUMA_PROFILE"
   validate_mem_node "$NUMA_MEM_NODE"
+  MEMORY_ONLY_NODES="$(get_memory_only_nodes || true)"
+  if [[ -n "$MEMORY_ONLY_NODES" ]]; then
+    echo "Memory-only nodes : ${MEMORY_ONLY_NODES}"
+  else
+    echo "Memory-only nodes : (none)"
+  fi
+
+  if is_memory_only_node "$NUMA_MEM_NODE"; then
+    MEM_NODE_MEMORY_ONLY=1
+    NUMA_MEMS="$(ensure_mems_include_node "$NUMA_MEMS" "$NUMA_MEM_NODE")"
+    NUMA_MEMS="$(ensure_mems_include_node "$NUMA_MEMS" "$NUMA_CPU_NODE")"
+    USE_NUMACTL=1
+    NUMACTL_MEMBIND="$NUMA_MEM_NODE"
+    echo "[INFO] MEM node ${NUMA_MEM_NODE} is memory-only; cpuset.mems -> ${NUMA_MEMS}"
+    echo "[INFO] Will start mysqld with: numactl --membind=${NUMACTL_MEMBIND}"
+    validate_mem_node "$NUMA_CPU_NODE"
+  fi
+
   echo "CPU node       : ${NUMA_CPU_NODE}"
   echo "MEM node       : ${NUMA_MEM_NODE}"
   echo "CPUSET_NODE${NUMA_CPU_NODE} : ${NUMA_CPUS}"
-  echo "MEMSET_NODE${NUMA_MEM_NODE} : ${NUMA_MEMS}"
+  echo "cpuset.mems    : ${NUMA_MEMS}"
   echo
 
   local numa_args
@@ -166,7 +229,22 @@ main() {
     docker volume create "${DATA_VOLUME}" >/dev/null
   fi
 
+  local entrypoint_args=()
+  local cmd_args=()
+  if ((USE_NUMACTL)); then
+    if ! check_numactl_in_image; then
+      die "numactl not found in image ${MYSQL_IMAGE}. Install numactl or use a custom image."
+    fi
+    entrypoint_args=(--entrypoint "${NUMACTL_BIN}")
+    cmd_args=(--membind="${NUMACTL_MEMBIND}" "${ENTRYPOINT_BIN}" mysqld)
+  fi
+
   echo "[INFO] Starting new container with NUMA args: ${numa_args}"
+  if ((USE_NUMACTL)); then
+    echo "[INFO] EntryPoint : ${NUMACTL_BIN}"
+    echo "[INFO] Command    : numactl --membind=${NUMACTL_MEMBIND} ${ENTRYPOINT_BIN} mysqld"
+  fi
+
   # shellcheck disable=SC2086
   docker run -d --name "${CONTAINER_NAME}" \
     ${numa_args} \
@@ -175,7 +253,9 @@ main() {
     -v "${DATA_VOLUME}:/var/lib/mysql" \
     -v "${MYCNF}:/etc/mysql/conf.d/my.cnf:ro" \
     --restart unless-stopped \
-    "${MYSQL_IMAGE}" >/dev/null
+    "${entrypoint_args[@]}" \
+    "${MYSQL_IMAGE}" \
+    "${cmd_args[@]}" >/dev/null
 
   echo "[INFO] Waiting for MySQL ready..."
   for i in {1..60}; do

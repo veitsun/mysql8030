@@ -72,7 +72,7 @@ docker logs -f mysql8030
 映射端口在 3306 （**MySQL 正常启动并监听 3306 端口。**）
 
 
-## 4）NUMA 绑核/绑内存：没有 sudo 也可以做（但有条件）
+## 4）NUMA 绑核/绑内存
 
 如果你有权限用 docker 跑容器，一般也能用：
 - --cpuset-cpus
@@ -108,8 +108,8 @@ docker pull severalnines/sysbench
 ### 5.1 创建测试库/账号
 ```bash
 docker exec -it mysql8030 mysql -uroot -psunwei -e "
-CREATE DATABASE sbtest;
-CREATE USER 'sbuser'@'%' IDENTIFIED WITH mysql_native_password BY 'sbpass';
+CREATE DATABASE IF NOT EXISTS sbtest;
+CREATE USER IF NOT EXISTS 'sbuser'@'%' IDENTIFIED WITH mysql_native_password BY 'sbpass';
 GRANT ALL PRIVILEGES ON sbtest.* TO 'sbuser'@'%';
 FLUSH PRIVILEGES;"
 ```
@@ -193,94 +193,39 @@ numactl --hardware
 脚本里默认写的是：
 - node0 CPU: 0-31
 - node1 CPU: 32-63
+- 其他 node 需要通过 CPUSET_NODEx 环境变量提供
 
 根据服务器实际 numa 架构 来确定对应关系。
-然后把脚本中的 CPUSET_NODE0 / CPUSET_NODE1 修改为你的实际范围。
-也可以不改脚本，直接通过环境变量覆盖：
+ CPUSET_NODE0 / CPUSET_NODE1 修改为你的实际范围；node2+ 用 CPUSET_NODEx 指定。
+直接通过环境变量覆盖：
 ```bash
 CPUSET_NODE0="0-47" CPUSET_NODE1="48-95" ./run_sysbench_suite_numa_tps_qps.sh
 
 ```
 
-## 脚本 1：run_mysql_8030_numa.sh（重建 MySQL 容器 + NUMA 绑定）
+## 脚本：run_mysql_8030_numa.sh（重建 MySQL 容器 + NUMA 绑定）
 
 > 功能：
-> - 只要改 NUMA_PROFILE 即可选择 node&mem 组合
+> - 通过 NUMA_PROFILE=nodeX_memY 选择 CPU node / MEM node（X/Y 为整数）
+> - CPU node 需要设置 CPUSET_NODEx；MEMSET_NODEy 可选（默认等于 y）
 > - 自动 stop/rm 旧容器（同名）
 > - 默认使用 Docker volume（例如 mysql8030_data）保留数据
 > - 支持端口、root密码、my.cnf 挂载
 > - 不需要 sudo（前提：你能用 docker）
 
 使用实例：
-```
-node0 & mem0
-NUMA_PROFILE=node0_mem0 ./run_mysql_8030_numa.sh
-
-node1 & mem0（跨 NUMA）
-NUMA_PROFILE=node1_mem0 ./run_mysql_8030_numa.sh
-
-node1 & mem1
-NUMA_PROFILE=node1_mem1 ./run_mysql_8030_numa.sh
-```
-
-## 脚本 2：run_sysbench_suite_numa.sh（跑 workload + 输出 TPS 表格）
-
-> 功能：
-> - 支持相同的 NUMA_PROFILE，绑定 sysbench 压测容器 CPU+MEM
-> - 跑你指定的 workload
-> - 输出 CSV 表格（可追加历史结果对比）
-> - 标记 oltp_read_write 为重点（important=1）
-> - 保存每个 workload 的完整日志到文件，便于复核
-
-## 推荐执行流程（最标准）
-### 用 node0_mem0 启动 MySQL（固定数据库 NUMA）
 ```bash
-chmod +x run_mysql_8030_numa.sh run_sysbench_suite_numa.sh
+# node3 & mem2（需提供 CPUSET_NODE3）
+CPUSET_NODEx="96-127" NUMA_PROFILE=node3_mem2 ./run_mysql_8030_numa.sh
 
-CPUSET_NODE0="0-13" CPUSET_NODE1="14-27" NUMA_PROFILE=node0_mem0 ./run_mysql_8030_numa.sh
+# 对于 126 服务器：
 
+CPUSET_NODE0="0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46" CPUSET_NODE1="1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47" CPUSET_NODE3="" NUMA_PROFILE=node0_mem3 ./run_mysql_8030_numa.sh
 ```
-
-### 用不同 NUMA_PROFILE 跑 sysbench（对比压测端 NUMA）
-```bash
-CPUSET_NODE0="0-13" CPUSET_NODE1="14-27" NUMA_PROFILE=node0_mem0 ./run_sysbench_suite_numa_tps_qps.sh
-CPUSET_NODE0="0-13" CPUSET_NODE1="14-27" NUMA_PROFILE=node1_mem0 ./run_sysbench_suite_numa_tps_qps.sh
-CPUSET_NODE0="0-13" CPUSET_NODE1="14-27" NUMA_PROFILE=node1_mem1 ./run_sysbench_suite_numa_tps_qps.sh
-```
-
-这样你能比较：
-- 不同压测端 NUMA 组合对 TPS/抖动的影响
-- 如果你也重建 MySQL 容器为不同 NUMA_PROFILE，则可以比较数据库侧 NUMA 影响
-
 
 ---
 
 # 远端压测
-## 创建测试库/账号
-授权远程用户
-MySQL 的 root 在很多镜像默认只允许本地登录，需要创建一个远程账户：
-```bash
-docker exec -it mysql8030 mysql -uroot -psunwei -e "
-CREATE DATABASE sbtest;
-CREATE USER 'sbuser'@'%' IDENTIFIED BY 'sbpass';
-GRANT ALL PRIVILEGES ON sbtest.* TO 'sbuser'@'%';
-FLUSH PRIVILEGES;"
-```
-
-然后 sysbench 用这个账号做压测
-
-## preapare 灌数据
-
-```bash
-docker run --rm --network=host severalnines/sysbench \
-  sysbench /usr/share/sysbench/oltp_read_write.lua \
-  --mysql-host=127.0.0.1 --mysql-port=3306 \
-  --mysql-user=sbuser --mysql-password=sbpass --mysql-db=sbtest \
-  --tables=16 --table-size=1000000 \
-  prepare
-
-```
-
 ## 远端压测，基本命令
 
 ### 启动数据库
@@ -357,22 +302,6 @@ THREADS=32 TIME=60 RUNS=3 TABLES=16 TABLE_SIZE=1000000 \
 
 ```
 
-画图(需要  matplotlib )
-```python
-python3 plot_sysbench_numa_compare.py \
-  --csv sysbench_results/oltp_rw_remote_numa_compare.csv \
-  --output sysbench_results/oltp_rw_numa_compare.png
-
-```
-
-画图（这个凸显数据对比的差异）
---pad-ratio 是控制纵轴“留白”比例的参数。脚本在根据数据范围设定 y 轴上下界后，会按 (最大均值-最小均值) * pad_ratio（再加一点误差线余量）扩展上下边界。
-- 数值越小：越紧贴数据，放大差异，裁掉更多低位区间。
-- 数值越大：留白更多，纵轴更宽松，便于避免标注/箭头重叠。默认值 0.25，想更聚焦可试 0.1，如需更多空间可试 0.4
-
-```python
-python3 plot_sysbench_numa_compare_zoomed.py --csv sysbench_results/oltp_rw_remote_numa_compare.csv --output sysbench_results/oltp_rw_numa_compare_zoom.png --pad-ratio 0.2
-```
 
 ## 远端压测修改并发数，并修改测试数据量，重新做压测 
 当前的 innodb_buffer_pool_size=2G
@@ -451,3 +380,76 @@ python3 plot_sysbench_numa_compare.py \
 ```python
 python3 plot_sysbench_numa_compare_zoomed.py --csv sysbench_results/oltp_rw_remote_numa_compare.csv --output sysbench_results/oltp_rw_numa_compare_zoom.png --pad-ratio 0.2
 ```
+
+## 本地同机 NUMA 交叉压测脚本
+
+脚本：`run_sysbench_oltp_rw_local_numa_cross.sh`
+
+特点：
+- MySQL 用 Docker 跑，绑定 CPU=nodeX，内存=nodeY
+- sysbench 在宿主机跑：X!=Y 时 CPU/MEM=Y；X==Y 时 CPU/MEM=1
+- 每轮结果写入 CSV（含 TPS/QPS/P99），并保留日志
+
+### 用法
+
+```bash
+chmod +x run_sysbench_oltp_rw_local_numa_cross.sh
+
+# 例子：MySQL 绑 CPU=node0, MEM=node1；sysbench 绑 CPU=node1, MEM=node1
+CPUSET_NODE0="0-31" CPUSET_NODE1="32-63" \
+NUMA_PROFILE=node0_mem1 \
+MYSQL_USER=sbuser MYSQL_PASS=sbpass MYSQL_DB=sbtest \
+THREADS=32 TIME=1 RUN_TIME=60 RUNS=3 TABLES=16 TABLE_SIZE=1000000 \
+./run_sysbench_oltp_rw_local_numa_cross.sh
+
+# 示例：偶/奇核分配（按需替换）
+0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46
+1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47
+
+CPUSET_NODE0="0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,42,44,46" CPUSET_NODE1="1,3,5,7,9,11,13,15,17,19,21,23,25,27,29,31,33,35,37,39,41,43,45,47" \
+NUMA_PROFILE=node0_mem1 \
+MYSQL_USER=sbuser MYSQL_PASS=sbpass MYSQL_DB=sbtest \
+THREADS=32 TIME=1 RUN_TIME=60 RUNS=3 TABLES=16 TABLE_SIZE=1000000 \
+./run_sysbench_oltp_rw_local_numa_cross.sh
+
+# 例子：X==Y 时，sysbench 绑 node1（CPUSET_NODE1/MEMSET_NODE1）
+CPUSET_NODE0="0-31" CPUSET_NODE1="32-63" \
+NUMA_PROFILE=node0_mem0 \
+MYSQL_USER=sbuser MYSQL_PASS=sbpass MYSQL_DB=sbtest \
+THREADS=32 TIME=1 RUN_TIME=60 RUNS=3 TABLES=16 TABLE_SIZE=1000000 \
+./run_sysbench_oltp_rw_local_numa_cross.sh
+```
+
+### 参数说明（常用）
+
+- NUMA_PROFILE：格式 `nodeX_memY`。MySQL 取 nodeX 的 CPU，nodeY 的内存；sysbench 规则：X!=Y → CPU/MEM=Y，X==Y → CPU/MEM=1。
+- CPUSET_NODEx：每个 NUMA node 对应的 CPU 列表（如 `0-31`、`32-63`），请按 `numactl --hardware` 设置。X==Y 时使用 `CPUSET_NODE1`。
+- MEMSET_NODEx：每个 NUMA node 对应的内存节点 id（默认等于 x）。X==Y 时使用 `MEMSET_NODE1`。
+- MYSQL_USER / MYSQL_PASS / MYSQL_DB：sysbench 连接 MySQL 的账号、密码、库名。
+- THREADS：sysbench 并发线程数。
+- TIME：sysbench 运行时的 `--report-interval`（每隔多少秒输出一次探测结果）。
+- RUN_TIME：sysbench 运行时长（`--time`）。
+- RUNS：总共跑多少轮。
+- TABLES：表数量。
+- TABLE_SIZE：单表行数。
+- SYSBENCH_PERCENTILE：sysbench 输出百分位延迟（默认 99，对应 P99）。
+
+### 其他可选参数
+
+- MYSQL_IMAGE / CONTAINER_NAME / HOST_PORT / MYSQL_ROOT_PASSWORD / DATA_VOLUME / MYCNF：MySQL 容器相关配置（同 `run_mysql_8030_numa.sh`）。
+- SYSBENCH_BIN / SYSBENCH_LUA_DIR / NUMACTL_BIN：sysbench、lua 脚本、numactl 的路径。
+- OUT_DIR / CSV_FILE：输出目录和 CSV 文件路径。
+
+### 脚本执行流程（详细注释版）
+
+1. 解析 `NUMA_PROFILE`，确定 MySQL 的 CPU/MEM 绑定；按规则确定 sysbench 的 CPU/MEM 绑定。
+2. 校验 NUMA 节点是否在线，以及 docker cgroup 是否允许对应的内存节点。
+3. 停止并重建 MySQL 容器，使用 `--cpuset-cpus/--cpuset-mems` 做 NUMA 绑定。
+4. 通过 `numactl --physcpubind/--membind` 运行 sysbench，并记录日志。
+5. 从日志中解析 TPS/QPS/P99，写入 CSV。
+
+### CSV 字段说明
+
+- tps/qps：从 sysbench 输出解析的每秒事务/查询。
+- p99_latency_ms：`99th percentile`（毫秒），由 `SYSBENCH_PERCENTILE` 控制。
+- status：`ok/no_tps/no_qps/no_p99/failed` 等状态标记。
