@@ -53,7 +53,7 @@ SYSBENCH_LUA_DIR="${SYSBENCH_LUA_DIR:-/usr/share/sysbench}" # oltp_read_write.lu
 NUMACTL_BIN="${NUMACTL_BIN:-numactl}"
 SYSBENCH_PERCENTILE="${SYSBENCH_PERCENTILE:-99}" # 用于输出 P99 延迟
 
-OUT_DIR="${OUT_DIR:-./sysbench_results}"
+OUT_DIR="${OUT_DIR:-./archive}"
 CSV_FILE="${CSV_FILE:-$OUT_DIR/oltp_rw_local_numa_cross.csv}" # CSV 结果输出路径
 # ----------------------------------------------------------------------------
 
